@@ -405,9 +405,10 @@ impl Primitive {
         matches!(
             self,
             (But | With | Backward | Above | Below)
-                | (Choose | Permute)
                 | Struct
-                | (Sort | Chunks | Coordinate | Astar | Fft | Triangle | Case | Layout)
+                | Obverse
+                | (Sort | Astar | Fft | Case | Choose | Permute | Layout)
+                | (Chunks | Coordinate | Triangle)
                 | Sys(Ffi | MemCopy | MemFree | TlsListen)
                 | (Stringify | Quote | Sig)
         )
@@ -926,6 +927,7 @@ impl Primitive {
             | Primitive::Below
             | Primitive::Un
             | Primitive::Under
+            | Primitive::Obverse
             | Primitive::Content
             | Primitive::Both
             | Primitive::Fork

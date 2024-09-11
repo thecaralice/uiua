@@ -140,6 +140,87 @@ impl Compiler {
                     )?;
                     Ok(true)
                 }
+                Modifier::Primitive(Primitive::Obverse) => {
+                    let mut funcs = Vec::new();
+                    for br in &pack.branches {
+                        let word = br.clone().map(Word::Func);
+                        let span = word.span.clone();
+                        let (nf, sig) = self.compile_operand_word(word)?;
+                        let func = self.make_function(span.into(), sig, nf);
+                        funcs.push(func);
+                    }
+                    let spandex = self.add_span(modifier.span.clone());
+                    let mut instrs = EcoVec::new();
+                    let sig = match funcs.as_slice() {
+                        [a, b] => {
+                            instrs.push(Instr::PushFunc(b.clone()));
+                            if a.signature() == b.signature().inverse() {
+                                instrs.push(Instr::PushFunc(a.clone()));
+                                instrs.push(Instr::Prim(Primitive::SetInverse, spandex));
+                            } else {
+                                instrs.push(Instr::PushFunc(a.clone()));
+                                instrs.push(Instr::PushFunc(a.clone()));
+                                instrs.push(Instr::Prim(Primitive::SetUnder, spandex));
+                            }
+                            a.signature()
+                        }
+                        [a, b, c] => {
+                            instrs.push(Instr::PushFunc(c.clone()));
+                            instrs.push(Instr::PushFunc(b.clone()));
+                            instrs.push(Instr::PushFunc(a.clone()));
+                            instrs.push(Instr::Prim(Primitive::SetUnder, spandex));
+                            a.signature()
+                        }
+                        [a, b, c, d] => {
+                            instrs.push(Instr::PushFunc(b.clone()));
+                            instrs.push(Instr::PushFunc(a.clone()));
+                            if !a.signature().is_compatible_with(b.signature()) {
+                                self.emit_diagnostic(
+                                    format!(
+                                        "setinv's functions must have opposite signatures, \
+                                        but their signatures are {} and {}",
+                                        a.signature(),
+                                        b.signature()
+                                    ),
+                                    DiagnosticKind::Warning,
+                                    modifier.span.clone(),
+                                );
+                            }
+                            instrs.push(Instr::Prim(Primitive::SetInverse, spandex));
+                            let set_inv_func = self.make_function(
+                                FunctionId::Anonymous(modifier.span.clone()),
+                                a.signature(),
+                                take(&mut instrs).into(),
+                            );
+                            instrs.push(Instr::PushFunc(d.clone()));
+                            instrs.push(Instr::PushFunc(c.clone()));
+                            instrs.push(Instr::PushFunc(set_inv_func));
+                            instrs.push(Instr::Prim(Primitive::SetUnder, spandex));
+                            a.signature()
+                        }
+                        funcs => {
+                            return Err(self.fatal_error(
+                                modifier.span.clone(),
+                                format!(
+                                    "Obverse requires 1, 2, or 3 branches, \
+                                    but {} were provided",
+                                    funcs.len()
+                                ),
+                            ))
+                        }
+                    };
+                    if call {
+                        self.push_all_instrs(instrs);
+                    } else {
+                        let func = self.make_function(
+                            FunctionId::Anonymous(modifier.span.clone()),
+                            sig,
+                            instrs.into(),
+                        );
+                        self.push_instr(Instr::PushFunc(func));
+                    }
+                    Ok(true)
+                }
                 m if m.args() >= 2 => {
                     let new = Modified {
                         modifier: modifier.clone(),
@@ -461,18 +542,34 @@ impl Compiler {
         }
 
         // Compile operands
-        let instrs = self.compile_words(modified.operands, false)?;
-
+        let spandex = self.add_span(modified.modifier.span.clone());
+        self.modified_impl(
+            FunctionId::Primitive(prim),
+            eco_vec![Instr::Prim(prim, spandex)],
+            &modified.modifier.span,
+            modified.operands,
+            call,
+        )
+    }
+    fn modified_impl(
+        &mut self,
+        function_id: FunctionId,
+        modifier_instrs: EcoVec<Instr>,
+        modifier_span: &CodeSpan,
+        operands: Vec<Sp<Word>>,
+        call: bool,
+    ) -> UiuaResult {
+        let instrs = self.compile_words(operands, false)?;
         if call {
             self.push_all_instrs(instrs);
-            self.primitive(prim, modified.modifier.span, true)?;
+            self.instructions(function_id, modifier_instrs, modifier_span, true)?;
         } else {
             self.new_functions.push(NewFunction::default());
             self.push_all_instrs(instrs);
-            self.primitive(prim, modified.modifier.span.clone(), true)?;
+            self.instructions(function_id, modifier_instrs, modifier_span, true)?;
             let new_func = self.new_functions.pop().unwrap();
-            let sig = self.sig_of(&new_func.instrs, &modified.modifier.span)?;
-            let func = self.make_function(modified.modifier.span.into(), sig, new_func);
+            let sig = self.sig_of(&new_func.instrs, modifier_span)?;
+            let func = self.make_function(modifier_span.clone().into(), sig, new_func);
             self.push_instr(Instr::PushFunc(func));
         }
         Ok(())
@@ -909,6 +1006,29 @@ impl Compiler {
                     }
                 } else {
                     return Err(self.fatal_error(f_span, "No inverse found"));
+                }
+            }
+            Obverse => {
+                let operand = modified.code_operands().next().unwrap().clone();
+                let span = operand.span.clone();
+                let spandex = self.add_span(span.clone());
+                let (func, sig) = self.compile_operand_word(operand)?;
+                let func = self.make_function(span.clone().into(), sig, func);
+                let mut instrs = EcoVec::new();
+                instrs.push(Instr::PushFunc(Function::new(
+                    FunctionId::Unnamed,
+                    Signature::new(0, 0),
+                    (0, 0).into(),
+                    0,
+                )));
+                instrs.push(Instr::PushFunc(func.clone()));
+                instrs.push(Instr::PushFunc(func));
+                instrs.push(Instr::Prim(Primitive::SetUnder, spandex));
+                if call {
+                    self.push_all_instrs(instrs);
+                } else {
+                    let func = self.make_function(FunctionId::Anonymous(span), sig, instrs.into());
+                    self.push_instr(Instr::PushFunc(func));
                 }
             }
             SetInverse => {
