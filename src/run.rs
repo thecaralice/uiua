@@ -27,8 +27,8 @@ use crate::{
     lex::Span,
     value::Value,
     Assembly, BindingKind, CodeSpan, Compiler, Complex, Ident, Inputs, IntoSysBackend, LocalName,
-    Primitive, SafeSys, SysBackend, SysOp, TraceFrame, UiuaError, UiuaErrorKind, UiuaResult,
-    VERSION,
+    Primitive, Report, SafeSys, SysBackend, SysOp, TraceFrame, UiuaError, UiuaErrorKind,
+    UiuaResult, VERSION,
 };
 
 /// The Uiua interpreter
@@ -80,6 +80,10 @@ pub(crate) struct Runtime {
     pub(crate) output_comments: HashMap<usize, Vec<Vec<Value>>>,
     /// Memoized values
     pub(crate) memo: Arc<ThreadLocal<RefCell<MemoMap>>>,
+    /// The results of tests
+    pub(crate) test_results: Vec<UiuaResult>,
+    /// Reports to print
+    pub(crate) reports: Vec<Report>,
 }
 
 type MemoMap = HashMap<FunctionId, HashMap<Vec<Value>, Vec<Value>>>;
@@ -205,6 +209,8 @@ impl Default for Runtime {
             thread: ThisThread::default(),
             output_comments: HashMap::new(),
             memo: Arc::new(ThreadLocal::new()),
+            test_results: Vec::new(),
+            reports: Vec::new(),
         }
     }
 }
@@ -248,6 +254,16 @@ impl Uiua {
     /// Take the system backend
     pub fn take_backend<T: SysBackend + Default>(&mut self) -> Option<T> {
         self.downcast_backend_mut::<T>().map(take)
+    }
+    /// Take all pending reports
+    pub fn take_reports(&mut self) -> Vec<Report> {
+        take(&mut self.rt.reports)
+    }
+    /// Print all pending reports
+    pub fn print_reports(&mut self) {
+        for report in self.take_reports() {
+            println!("{report}");
+        }
     }
     /// Take the assembly
     pub fn take_asm(&mut self) -> Assembly {
@@ -338,13 +354,29 @@ impl Uiua {
         fn run_asm(env: &mut Uiua, asm: Assembly) -> UiuaResult {
             env.asm = asm;
             env.rt.execution_start = env.rt.backend.now();
-            let res = env.run_top_slices();
+            let mut res = env.run_top_slices();
+            let mut push_error = |te: UiuaError| match &mut res {
+                Ok(()) => res = Err(te),
+                Err(e) => e.multi.push(te),
+            };
+            if !env.rt.test_results.is_empty() {
+                let total = env.rt.test_results.len();
+                let mut successes = 0;
+                for res in env.rt.test_results.drain(..) {
+                    match res {
+                        Ok(()) => successes += 1,
+                        Err(e) => push_error(e),
+                    }
+                }
+                (env.rt.reports).push(Report::tests(successes, total - successes));
+            }
             if res.is_err() {
                 env.rt = Runtime {
                     backend: env.rt.backend.clone(),
                     execution_limit: env.rt.execution_limit,
                     time_instrs: env.rt.time_instrs,
-                    output_comments: env.rt.output_comments.clone(),
+                    output_comments: take(&mut env.rt.output_comments),
+                    reports: take(&mut env.rt.reports),
                     ..Runtime::default()
                 };
             }
@@ -1480,6 +1512,8 @@ code:
                 interrupted: self.rt.interrupted.clone(),
                 output_comments: HashMap::new(),
                 memo: self.rt.memo.clone(),
+                test_results: Vec::new(),
+                reports: Vec::new(),
                 thread,
             },
         };
